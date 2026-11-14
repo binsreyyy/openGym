@@ -122,6 +122,25 @@ function applyPrefs(theme, accent) {
   if (MOBILE) setSystemBarsLight(de.dataset.theme === 'light')
 }
 
+function MembershipBanner() {
+  const user = useStore(s => s.user)
+  if (!user || user.admin || typeof user.membershipUntil !== 'number') return null
+  const remMs = user.membershipUntil - Date.now()
+  const daysLeft = Math.ceil(remMs / 86400000)
+  const dateStr = new Date(user.membershipUntil).toLocaleDateString()
+  if (user.membershipExpired || remMs <= 0) {
+    return <div role="status" style={{ background: 'rgba(255,69,58,0.16)', color: 'var(--red)', padding: '10px 14px', borderRadius: 'var(--r)', marginBottom: 12, fontSize: 13, fontWeight: 600, textAlign: 'center', border: '1px solid rgba(255,69,58,0.3)' }}>
+      🔒 Read-Only Mode · Your gym membership expired on {dateStr}. Renew at the front desk to start workouts.
+    </div>
+  }
+  if (daysLeft <= 3) {
+    return <div role="status" style={{ background: 'rgba(255,214,10,0.16)', color: 'var(--yellow)', padding: '9px 14px', borderRadius: 'var(--r)', marginBottom: 12, fontSize: 13, fontWeight: 600, textAlign: 'center', border: '1px solid rgba(255,214,10,0.3)' }}>
+      ⏳ Your gym membership expires in {daysLeft === 1 ? '1 day' : daysLeft + ' days'} ({dateStr}). Renew at the front desk to keep your streak going!
+    </div>
+  }
+  return null
+}
+
 function Shell() {
   const navigate = useNavigate()
   const loc = useLocation()
@@ -285,13 +304,14 @@ function Shell() {
   // brings it back. Finishing stays in the workout's own header and list, not in a bottom button
   // (owner, 2026-10-14: the bottom Complete / Finish button of #563 is gone again).
   const inWorkout = loc.pathname === '/workout' && !!S.active
+  const inAdmin = loc.pathname.startsWith('/admin')
   useEffect(() => {
-    document.body.classList.toggle('no-tabbar', inWorkout)
+    document.body.classList.toggle('no-tabbar', inWorkout || inAdmin)
     return () => document.body.classList.remove('no-tabbar')
-  }, [inWorkout])
+  }, [inWorkout, inAdmin])
   // The chat owns the bottom of the screen as well: its composer sits where the tabs would be.
   // The first-launch card has no tabs either: they changed the route behind it.
-  const noTabs = inWorkout || loc.pathname === '/coach' || needsMobileOnboarding || permSteps
+  const noTabs = inWorkout || inAdmin || loc.pathname === '/coach' || needsMobileOnboarding || permSteps
 
   const authed = user || isGuest
   // The first setup is through (sign-in or "Use on this device", and the phone's permission
@@ -309,7 +329,7 @@ function Shell() {
     if (!setupDone || tourAsked.current) return
     const tm = setTimeout(() => {
       const st = useStore.getState()
-      if (tourAsked.current || tourState() || st.S.active || useUI.getState().sheets.length || /^#\/workout/.test(window.location.hash || '')) return
+      if (tourAsked.current || tourState() || st.S.active || useUI.getState().sheets.length || /^#\/(workout|admin)/.test(window.location.hash || '')) return
       const rec = readTour()
       const at = resumeAt(rec)
       const synced = !st.user || (st.sync?.status === 'ok' && st.sync.lastSynced > 0)
@@ -371,6 +391,7 @@ function Shell() {
           lands it simply stays: same key, same parent, so React keeps it instead of mounting
           the route again. */}
       <div id="app">
+        {authed && !inAdmin && !needsMobileOnboarding && !permSteps && <MembershipBanner />}
         <Page key={loc.pathname} loc={loc} render={view} motion={pageMotion(pathRef.current, loc.pathname, navType)} />
         {showPreview && <Page key={preview} loc={previewLoc(preview)} render={view} under scrollY={scrollPositions.get(preview) || 0} />}
       </div>
@@ -387,9 +408,9 @@ function Shell() {
       {tour && authed && <Suspense fallback={null}><Tour /></Suspense>}
       {/* Seasonal decoration (lib/seasonal.js): nothing, and nothing loaded, out of season. Never
           over a running workout or the first-launch screens. */}
-      {authed && !needsMobileOnboarding && !permSteps && <SeasonalLayer hidden={inWorkout || loc.pathname === '/workout'} />}
+      {authed && !needsMobileOnboarding && !permSteps && <SeasonalLayer hidden={inWorkout || inAdmin || loc.pathname === '/workout'} />}
       {/* Your year in openGym (components/WrappedEntry.jsx): nothing loaded until it is opened. */}
-      {authed && isOn(S, 'motivation') && <WrappedLayer ready={setupDone} />}
+      {authed && !inAdmin && isOn(S, 'motivation') && <WrappedLayer ready={setupDone} />}
     </>
   )
 }

@@ -62,6 +62,7 @@ const INVITE_ONLY = /^(1|true|yes|on)$/i.test(process.env.INVITE_ONLY || '');
 // kept local) would otherwise hand admin to whoever signs up first after the upgrade.
 // FIRST_USER_ADMIN=1 turns it on for a fresh install.
 const FIRST_USER_ADMIN = /^(1|true|yes|on)$/i.test(process.env.FIRST_USER_ADMIN || '');
+const inviteRequired = () => INVITE_ONLY && !(FIRST_USER_ADMIN && db.users.length === 0);
 // Checked synchronously right before db.users.push, with no await in between, so two
 // registrations racing each other cannot both see an empty instance.
 function claimFirstAdmin(req, user) {
@@ -1191,7 +1192,14 @@ function loginTarget(body) {
 }
 const acctKey = u => 'acct:' + u.id;
 const passkeyCount = u => db.creds.filter(c => c.userId === u.id).length;
-const publicUser = u => ({ id: u.id, name: u.name, admin: isAdmin(u), ...(isOwner(u) ? { owner: true } : {}) });
+const isExpired = u => !isAdmin(u) && typeof u.membershipUntil === 'number' && Date.now() > u.membershipUntil;
+const cleanPhone = s => typeof s === 'string' ? s.trim().slice(0, 30) : '';
+const publicUser = u => ({
+  id: u.id, name: u.name, admin: isAdmin(u),
+  ...(isOwner(u) ? { owner: true } : {}),
+  ...(typeof u.membershipUntil === 'number' ? { membershipUntil: u.membershipUntil, membershipExpired: isExpired(u) } : {}),
+  ...(u.phone ? { phone: u.phone } : {})
+});
 const POLICY_ERRORS = {
   'too-short': `the password needs at least ${MIN_LENGTH} characters`,
   'too-long': `the password can have at most ${MAX_LENGTH} characters`,
@@ -1405,8 +1413,8 @@ const passwordRoutes = {
     if (!name) return json(res, 400, { error: 'name required', code: 'missing' });
     const code = text(body.code).trim().toUpperCase();
     const invite = () => db.invites.find(i => i.code === code && !i.usedBy && !i.revoked);
-    if (INVITE_ONLY && addressPaused(req, res, 'signup')) return;
-    if (INVITE_ONLY && !invite()) {
+    if (inviteRequired() && addressPaused(req, res, 'signup')) return;
+    if (inviteRequired() && !invite()) {
       audit(req, 'auth.register.denied', { ok: false, name, msg: 'invite-rejected' });
       strikeAddress(req, 'signup');
       return json(res, 403, { error: 'a valid invite code is required', code: 'invite' });
@@ -1436,12 +1444,14 @@ const passwordRoutes = {
     if (email && addressPaused(req, res, 'email')) return;
     const h = await hashPassword(body.password);
     let inv = null;
-    if (INVITE_ONLY) {
+    if (inviteRequired()) {
       inv = invite();
       if (!inv) {
         audit(req, 'auth.register.fail', { ok: false, name, msg: 'invite-invalid' });
         return json(res, 403, { error: 'invite code is no longer valid, ask for a new one', code: 'invite' });
       }
+    } else if (code) {
+      inv = invite() || null;
     }
     if (nameTaken(name)) {
       // No name in the row: it is an address, and the log keeps none (maskEmail is for owners).
@@ -1450,10 +1460,15 @@ const passwordRoutes = {
     }
     // No await from here to the push: nothing can take the address between this check and it.
     if (email && emailTaken(email)) return emailRefused();
+    const phone = cleanPhone(body.phone);
     const created = new Date().toISOString();
-    const user = { id: crypto.randomBytes(12).toString('base64url'), name, created, pw: { h, set: created }, ...(email ? { email } : {}) };
+    const user = { id: crypto.randomBytes(12).toString('base64url'), name, created, pw: { h, set: created }, ...(email ? { email } : {}), ...(phone ? { phone } : {}) };
     if (inv) { user.invitedBy = inv.code; inv.usedBy = user.id; inv.usedAt = created; }
     claimFirstAdmin(req, user);
+    if (inv && inv.days > 0 && !isAdmin(user)) {
+      user.membershipUntil = Date.now() + inv.days * 86400000;
+      user.planDays = inv.days;
+    }
     db.users.push(user);
     saveDb();
     audit(req, 'auth.register.ok', { user, msg: inv ? inv.code + ' · password' : 'password' });
@@ -2104,7 +2119,7 @@ const routes = {
     // were not signed in when you asked", and would re-ask on every sign-in on every instance
     // that has no Coach. The key's absence is that answer.
     json(res, 200, {
-      invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST,
+      invite_only: inviteRequired(), allow_guest: ALLOW_GUEST,
       // Only when on, so an instance without passwords answers exactly as it did before (#118).
       ...(PASSWORD_LOGIN ? { password_login: true } : {}),
       // Public: the sign-in screen is the first thing that reads it.
@@ -2139,12 +2154,13 @@ const routes = {
     const name = text(body.name).trim().slice(0, 40);
     if (!name) return json(res, 400, { error: 'name required' });
     const code = text(body.code).trim().toUpperCase();
-    if (INVITE_ONLY && !db.invites.some(i => i.code === code && !i.usedBy && !i.revoked)) {
+    if (inviteRequired() && !db.invites.some(i => i.code === code && !i.usedBy && !i.revoked)) {
       // The rejected code itself is never recorded — a near-miss guess in the log is a liability.
       audit(req, 'auth.register.denied', { ok: false, name, msg: 'invite-rejected' });
       return json(res, 403, { error: 'a valid invite code is required', code: 'invite' });
     }
     const uid = crypto.randomBytes(12).toString('base64url');
+    const phone = cleanPhone(body.phone);
     const options = await generateRegistrationOptions({
       rpName: RP_NAME, rpID: RP_ID,
       userID: Buffer.from(uid), userName: name, userDisplayName: name,
@@ -2152,7 +2168,7 @@ const routes = {
       authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
       excludeCredentials: []
     });
-    const cid = putChallenge({ kind: 'register', challenge: options.challenge, name, uid, code });
+    const cid = putChallenge({ kind: 'register', challenge: options.challenge, name, uid, code, ...(phone ? { phone } : {}) });
     json(res, 200, { cid, options });
   },
 
@@ -2188,16 +2204,22 @@ const routes = {
     }
     // Re-check the invite at the last moment (it may have been used/revoked since options), then burn it.
     let invite = null;
-    if (INVITE_ONLY) {
+    if (inviteRequired()) {
       invite = db.invites.find(i => i.code === c.code && !i.usedBy && !i.revoked);
       if (!invite) {
         audit(req, 'auth.register.fail', { ok: false, name: c.name, msg: 'invite-invalid' });
         return json(res, 403, { error: 'invite code is no longer valid, ask for a new one', code: 'invite' });
       }
+    } else if (c.code) {
+      invite = db.invites.find(i => i.code === c.code && !i.usedBy && !i.revoked) || null;
     }
-    const user = { id: c.uid, name: c.name, created: new Date().toISOString() };
+    const user = { id: c.uid, name: c.name, created: new Date().toISOString(), ...(c.phone ? { phone: c.phone } : {}) };
     if (invite) { user.invitedBy = invite.code; invite.usedBy = user.id; invite.usedAt = user.created; }
     claimFirstAdmin(req, user);
+    if (invite && invite.days > 0 && !isAdmin(user)) {
+      user.membershipUntil = Date.now() + invite.days * 86400000;
+      user.planDays = invite.days;
+    }
     db.users.push(user);
     db.creds.push({
       id: credential.id, userId: user.id,
@@ -2529,6 +2551,9 @@ const routes = {
   'PUT /api/data': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
+    if (isExpired(user)) {
+      return json(res, 403, { error: 'membership expired — please renew at the front desk', code: 'membership-expired', membershipUntil: user.membershipUntil });
+    }
     const body = await readBody(req);
     if (!body.state || typeof body.state !== 'object') return json(res, 400, { error: 'state required' });
     // An object with nothing of the profile in it empties the document with the counter left
@@ -2767,6 +2792,10 @@ const routes = {
       return {
         id: u.id, name: u.name, created: u.created || null,
         disabled: !!u.disabled, admin: isAdmin(u), owner: isOwner(u), invitedBy: u.invitedBy || null,
+        membershipUntil: u.membershipUntil || null,
+        membershipExpired: isExpired(u),
+        planDays: u.planDays || null,
+        phone: u.phone || null,
         workouts: workouts.length,
         lastWorkout: last ? last.d : null,
         lastSync: lastSyncOf(u, S),
@@ -2790,6 +2819,11 @@ const routes = {
     json(res, 200, {
       user: {
         id: u.id, name: u.name, created: u.created || null, disabled: !!u.disabled, admin: isAdmin(u), owner: isOwner(u), invitedBy: u.invitedBy || null,
+        membershipUntil: u.membershipUntil || null,
+        membershipExpired: isExpired(u),
+        planDays: u.planDays || null,
+        phone: u.phone || null,
+        renewals: Array.isArray(u.renewals) ? u.renewals : [],
         // Only on an instance with password sign-in: whether they have one, and until when an
         // unused reset code is good.
         ...(PASSWORD_LOGIN ? { password: hasPassword(u), email: u.email || null, resetUntil: u.pwReset?.exp > Date.now() ? u.pwReset.exp : null } : {}),
@@ -2838,6 +2872,45 @@ const routes = {
     saveDb();
     audit(req, u.disabled ? 'admin.user.disable' : 'admin.user.enable', { user: admin, target: u });
     json(res, 200, { ok: true, id: u.id, disabled: u.disabled });
+  },
+
+  'POST /api/admin/user/renew': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    const body = await readBody(req);
+    const u = db.users.find(x => x.id === body.id);
+    if (!u) return json(res, 404, { error: 'no such user' });
+    if (typeof body.phone === 'string') {
+      const ph = cleanPhone(body.phone);
+      if (ph) u.phone = ph; else delete u.phone;
+    }
+    const now = Date.now();
+    let until = u.membershipUntil || null;
+    let days = null;
+    if (body.clear === true) {
+      delete u.membershipUntil;
+      delete u.planDays;
+      until = null;
+    } else if (Number.isFinite(+body.days) && +body.days > 0) {
+      days = Math.min(3650, Math.max(1, Math.round(+body.days)));
+      const base = typeof u.membershipUntil === 'number' && u.membershipUntil > now ? u.membershipUntil : now;
+      until = base + days * 86400000;
+      u.membershipUntil = until;
+      u.planDays = days;
+    } else if (Number.isFinite(+body.until) && +body.until > 0) {
+      until = Math.round(+body.until);
+      u.membershipUntil = until;
+    } else if (typeof body.phone !== 'string') {
+      return json(res, 400, { error: 'days or until required' });
+    }
+    const note = text(body.note).slice(0, 60);
+    if (days || body.until || body.clear) {
+      u.renewals = Array.isArray(u.renewals) ? u.renewals : [];
+      u.renewals.unshift({ ts: now, days, until, by: admin.name || admin.id, ...(note ? { note } : {}) });
+      if (u.renewals.length > 50) u.renewals.length = 50;
+      audit(req, 'admin.user.renew', { user: admin, target: u, msg: days ? `+${days}d` : until ? new Date(until).toISOString().slice(0, 10) : 'unlimited' });
+    }
+    saveDb();
+    json(res, 200, { ok: true, id: u.id, membershipUntil: u.membershipUntil || null, membershipExpired: isExpired(u), phone: u.phone || null, renewals: u.renewals || [] });
   },
 
   // Disable locks an account out; this removes it. The one destructive action in the app, so the
@@ -2913,10 +2986,11 @@ const routes = {
     // code is good, so the code itself has to be the thing that isn't worth guessing. Codes already
     // in db.json keep working — validation is an exact string compare, never a length or format check.
     do { code = crypto.randomBytes(8).toString('hex').toUpperCase(); } while (db.invites.some(i => i.code === code));
-    const invite = { code, note: text(body.note).slice(0, 60), createdBy: admin.id, created: new Date().toISOString() };
+    const days = Number.isFinite(+body.days) && +body.days > 0 ? Math.min(3650, Math.max(1, Math.round(+body.days))) : null;
+    const invite = { code, note: text(body.note).slice(0, 60), ...(days ? { days } : {}), createdBy: admin.id, created: new Date().toISOString() };
     db.invites.push(invite);
     saveDb();
-    audit(req, 'admin.invite.create', { user: admin, msg: code });
+    audit(req, 'admin.invite.create', { user: admin, msg: days ? `${code} (${days}d)` : code });
     json(res, 200, { invite });
   },
 

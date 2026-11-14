@@ -65,6 +65,7 @@ const LABELS = {
   'auth.throttled': 'Too many failed attempts from one address',
   'admin.user.disable': 'Disabled an account',
   'admin.user.enable': 'Re-enabled an account',
+  'admin.user.renew': 'Updated membership',
   'admin.user.delete': 'Deleted an account',
   'admin.password.reset': 'Issued a password reset code',
   'admin.role.grant': 'Made someone an admin',

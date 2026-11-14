@@ -15,6 +15,7 @@ import { dateLocale } from '../lib/i18n-core.js'
 import { api, webauthnOK, passkeyAssertion, passwordLogin, passwordRegister, passwordResetRedeem } from '../lib/api.js'
 import { askAddDeviceData } from '../sheets.jsx'
 import { Row, Button } from './ui.jsx'
+import { openInstallSheet, isStandaloneApp } from './InstallPrompt.jsx'
 
 // The server's floor (api/password.js MIN_LENGTH), checked here first so the common mistake is
 // answered without a round trip. The server still decides.
@@ -154,7 +155,7 @@ export const openPasswordSignIn = onPasskey => ui().openSheet(close => <Password
 
 /* The password half of creating a profile. Name and invite code are the caller's state, so
    switching between passkey and password on the sign-up sheet keeps what was typed. */
-export function PasswordRegisterForm({ close, inviteOnly, name, setName, code, setCode }) {
+export function PasswordRegisterForm({ close, inviteOnly, name, setName, code, setCode, phone = '', setPhone }) {
   const [email, setEmail] = useState('')
   const [pw, setPw] = useState('')
   const [again, setAgain] = useState('')
@@ -165,6 +166,7 @@ export function PasswordRegisterForm({ close, inviteOnly, name, setName, code, s
     if (busy) return
     const n = name.trim()
     const mail = email.trim()
+    const ph = String(phone || '').trim()
     const bad = !n ? t('Enter a name')
       : mail && !looksLikeEmail(mail) ? t('That is not an e-mail address.')
       : inviteOnly && !code.trim() ? t('An invite code is required')
@@ -174,9 +176,10 @@ export function PasswordRegisterForm({ close, inviteOnly, name, setName, code, s
     if (bad) { setErr(bad); return }
     setBusy(true); setErr(null)
     try {
-      const u = await passwordRegister(n, pw, code.trim(), mail)
+      const u = ph ? await passwordRegister(n, pw, code.trim(), mail, ph) : await passwordRegister(n, pw, code.trim(), mail)
       const st = useStore.getState()
       st.setUser(u); close()
+      if (!isStandaloneApp()) setTimeout(() => openInstallSheet({ memberName: u.name }), 350)
       if (hasData(useStore.getState().S)) { await st.pushState(); toast(t('Profile created, and this device’s data moved into it')) }
       else { await st.pullState(); toast(t('Welcome, {0}', u.name)) }
     } catch (e) { setErr(passwordError(e)) }
@@ -189,6 +192,11 @@ export function PasswordRegisterForm({ close, inviteOnly, name, setName, code, s
     <input className="input" type="email" name="email" autoComplete="email" inputMode="email" placeholder={t('E-mail (optional)')} maxLength={254}
       value={email} onChange={e => setEmail(e.target.value)} {...field} />
     <div className="dim small" style={{ marginTop: 6 }}>{t('Lets you sign in with it instead of your name. Nothing is ever sent to it.')}</div>
+    {setPhone && <>
+      <div style={{ height: 10 }} />
+      <input className="input" type="tel" name="tel" autoComplete="tel" inputMode="tel" placeholder="Phone number (optional)" maxLength={30}
+        value={phone} onChange={e => setPhone(e.target.value)} {...field} />
+    </>}
     {inviteOnly && <>
       <div style={{ height: 10 }} />
       <input className="input" placeholder={t('Invite code')} maxLength={40} value={code}

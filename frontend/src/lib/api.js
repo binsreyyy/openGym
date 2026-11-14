@@ -387,8 +387,8 @@ export function passkeyError(e, fallback) {
   }
   return e?.message || fallback
 }
-export async function passkeyRegister(name, code) {
-  const { cid, options } = await api('/api/register/options', { method: 'POST', body: JSON.stringify({ name, code: code || '' }) })
+export async function passkeyRegister(name, code, phone) {
+  const { cid, options } = await api('/api/register/options', { method: 'POST', body: JSON.stringify({ name, code: code || '', ...(phone ? { phone } : {}) }) })
   const cred = await navigator.credentials.create({ publicKey: toCreationOptions(options) })
   const res = await api('/api/register/verify', { method: 'POST', body: JSON.stringify({ cid, credential: credToJSON(cred) }) })
   return res.user
@@ -428,8 +428,8 @@ export async function passwordLogin(name, password) {
 }
 // `email` is optional, and sent only when there is one: a server from before the field would
 // otherwise ignore it without a word, which is the same thing.
-export async function passwordRegister(name, password, code, email) {
-  return (await post('/api/register/password', { name, password, code: code || '', ...(email ? { email } : {}) })).user
+export async function passwordRegister(name, password, code, email, phone) {
+  return (await post('/api/register/password', { name, password, code: code || '', ...(email ? { email } : {}), ...(phone ? { phone } : {}) })).user
 }
 export async function passwordResetRedeem(name, code, next) {
   return (await post('/api/login/password-reset', { name, code, next })).user

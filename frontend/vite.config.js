@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { networkInterfaces } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
@@ -13,7 +14,7 @@ const backend = process.env.API_TARGET || 'http://127.0.0.1:3000'
 // real Origin is not ORIGIN — modern browsers get through on Sec-Fetch-Site: same-origin, and
 // presenting the expected Origin here covers the ones that don't send it. Match your .env if you
 // changed ORIGIN: API_ORIGIN=https://gym.example.com npm run dev
-const apiOrigin = process.env.API_ORIGIN || 'http://localhost:8080'
+const apiOrigin = process.env.API_ORIGIN || process.env.ORIGIN || 'http://localhost:5173'
 // Exercise media: served straight from catalogue/media in dev (see catalogueMedia below), or
 // proxied to a server of your choice with MEDIA_TARGET.
 const media = process.env.MEDIA_TARGET
@@ -100,14 +101,34 @@ const flavor = {
 // number, so the one question a bug report turns on, "which build were you running?", had no
 // answer from inside the app. Unset (the ordinary case, and every upstream build) it changes
 // nothing: the string is exactly package.json's version.
+/** Detect the laptop's non-internal IPv4 address (preferring Wi-Fi) so dev QR codes work from phones. */
+function detectLanHost() {
+  const nets = networkInterfaces()
+  const candidates = []
+  for (const [name, addrs] of Object.entries(nets)) {
+    for (const addr of addrs || []) {
+      if (addr.family !== 'IPv4' || addr.internal) continue
+      if (addr.address.startsWith('169.254.') || addr.address.startsWith('192.168.56.')) continue
+      candidates.push({ name: name.toLowerCase(), address: addr.address })
+    }
+  }
+  const wifi = candidates.find(c => /wi-?fi|wlan/.test(c.name))
+  return (wifi || candidates[0])?.address || ''
+}
+
+const lanHost = detectLanHost()
 const pkgVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 const appVersion = process.env.APP_BUILD ? `${pkgVersion}+${process.env.APP_BUILD}` : pkgVersion
 
 export default defineConfig({
-  define: { __APP_VERSION__: JSON.stringify(appVersion) },
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+    __DEV_LAN_HOST__: JSON.stringify(lanHost),
+  },
   plugins: [react(), umami, flavor, swStamp, catalogueMedia],
   base: './',
   server: {
+    host: true,
     // The Coach's core (payload, validator, prompts, HTTP adapters) lives in ../api/coach/core
     // and is imported by the phone build. vite build and vitest already reach it; the dev
     // server needs to be told the workspace is wider than frontend/.

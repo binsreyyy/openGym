@@ -220,6 +220,26 @@ export function confirmSheet(opts) {
   ui().openSheet(close => <ConfirmDialog {...opts} close={close} />, { kind: 'center', ...(opts.locked ? { locked: true } : {}) })
 }
 
+export function isMembershipExpired(user = useStore.getState().user) {
+  if (!user || user.admin) return false
+  if (user.membershipExpired) return true
+  return typeof user.membershipUntil === 'number' && Date.now() > user.membershipUntil
+}
+export function guardMembership() {
+  const u = useStore.getState().user
+  if (!isMembershipExpired(u)) return false
+  const dateStr = u?.membershipUntil ? fmtDate(new Date(u.membershipUntil).toISOString().slice(0, 10)) : ''
+  confirmSheet({
+    title: 'Membership Expired',
+    message: dateStr
+      ? `Your gym membership expired on ${dateStr}. Your workout history is in read-only mode — please visit the front desk to renew and start training!`
+      : 'Your gym membership has expired. Your workout history is in read-only mode — please visit the front desk to renew and start training!',
+    confirmText: 'Got it',
+    noCancel: true,
+  })
+  return true
+}
+
 /* ============================ starter plan ============================ */
 // Plan names and blurbs live here, not in lib/starter.js: check-source-strings.mjs only finds
 // string literals written inside a t() call, so copy parked in the catalog and passed in as a
@@ -427,6 +447,7 @@ function BwSheet({ required, onDone, close, initial, edit }) {
   </>
 }
 export function bwSheet(opts = {}) {
+  if (guardMembership()) return null
   const h = ui().openSheet(close => <BwSheet {...opts} close={close} />, { locked: !!opts.required })
   return h
 }
@@ -3446,6 +3467,7 @@ export function DayNoteRow({ iso, note }) {
 // `routineIds` accepts `string | string[] | null` — `[r.id]` for one routine,
 // `effectiveRoutineIds(...)` for today's planned session, `[]` / null for explicit freestyle.
 export function startFlow(routineIds) {
+  if (guardMembership()) return
   // The weigh-in is a setting (Settings → During a workout, issue #137): off goes straight
   // into the session with no body weight on it, same as "Start without weighing in".
   // Off in Settings → Workout, or with the Body module (Settings → Modules): straight into the session.
@@ -3455,6 +3477,7 @@ export function startFlow(routineIds) {
 // `opts` from the Apple Watch (lib/watch-sync.js): a session started there keeps the watch's id,
 // so the sets ticked on it find it, and its start time, however late the phone hears of it.
 export function beginWorkout(routineIds, bw, { id = null, start = null } = {}) {
+  if (guardMembership()) return
   const st = S()
   const { entries, routineIds: rids, routines } = buildCombinedEntries(st, routineIds)
   const startAt = Number.isFinite(start) && start > 0 ? start : Date.now()

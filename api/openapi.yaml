@@ -2901,6 +2901,57 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
               example: { error: "no such user" }
 
+  /api/admin/user/renew:
+    post:
+      tags: [admin]
+      operationId: adminUserRenew
+      summary: 'Admin: extend, set or clear a user membership expiry'
+      description: >-
+        Extends a user's membership by `days` (from the later of now or their current
+        `membershipUntil`), sets an explicit `until` timestamp, or clears expiry when
+        `clear: true`. Optionally updates `phone`. Admins cannot be set to expire. Audited
+        as `admin.user.renew`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string, description: The user id. }
+                days: { type: integer, minimum: 1, maximum: 3650 }
+                until: { type: number, description: Explicit expiry timestamp (ms). }
+                clear: { type: boolean }
+                phone: { type: string }
+                note: { type: string }
+      responses:
+        '200':
+          description: Membership updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+                  id: { type: string }
+                  membershipUntil: { oneOf: [{ type: number }, { type: 'null' }] }
+                  membershipExpired: { type: boolean }
+                  phone: { oneOf: [{ type: string }, { type: 'null' }] }
+                  renewals: { type: array, items: { type: object } }
+        '400':
+          description: Invalid parameters or target is an admin.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No user with that id.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/admin/user/delete:
     post:
       tags: [admin]

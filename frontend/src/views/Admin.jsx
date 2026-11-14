@@ -9,8 +9,68 @@ import { workoutVolume, setsDone } from '../lib/history.js'
 import { confirmSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
 import { Button } from '../components/ui.jsx'
+import QrCanvas from '../components/QrCanvas.jsx'
 import AdminCoach from './AdminCoach.jsx'
 import '../admin.css'
+
+const PLAN_TIERS = [
+  { days: 7, label: '+1 Week', short: '1W (7d)' },
+  { days: 30, label: '+1 Month', short: '1M (30d)' },
+  { days: 90, label: '+3 Months', short: '3M (90d)' },
+  { days: 365, label: '+1 Year', short: '1Y (365d)' },
+]
+function membershipStatus(u, now = Date.now()) {
+  if (u.admin) return { kind: 'admin', label: u.owner ? 'owner' : 'admin', cls: 'acc' }
+  if (typeof u.membershipUntil !== 'number') return { kind: 'unlimited', label: 'no expiry', cls: '' }
+  const diff = u.membershipUntil - now
+  const days = Math.ceil(diff / 86400000)
+  if (diff <= 0) {
+    const ago = Math.max(1, Math.floor(-diff / 86400000))
+    return { kind: 'expired', label: `expired ${ago}d ago`, cls: 'bad', days }
+  }
+  if (days <= 3) return { kind: 'expiring', label: `${days}d left`, cls: 'warn', days }
+  return { kind: 'active', label: `${days}d left`, cls: 'ok', days }
+}
+/** Swap localhost for the laptop's Wi-Fi LAN IP in dev so scanned QR codes open on a phone. */
+function defaultQrBase() {
+  if (typeof window === 'undefined') return ''
+  const { protocol, hostname, port, origin, pathname } = window.location
+  const lan = typeof __DEV_LAN_HOST__ !== 'undefined' ? __DEV_LAN_HOST__ : ''
+  const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
+  const baseOrigin = isLocal && lan ? `${protocol}//${lan}${port ? ':' + port : ''}` : origin
+  return baseOrigin + pathname
+}
+
+function InviteQrSheet({ invite, close }) {
+  const toast = useUI(s => s.toast)
+  const [memberName, setMemberName] = useState(invite.note || '')
+  const cleanName = memberName.trim()
+  const url = defaultQrBase()
+    + '?invite=' + encodeURIComponent(invite.code)
+    + (cleanName ? '&name=' + encodeURIComponent(cleanName) : '')
+  const copyUrl = () => { navigator.clipboard?.writeText(url).catch(() => {}); toast('Sign-up link copied') }
+  return <div style={{ textAlign: 'center', padding: '4px 0' }}>
+    <h3 style={{ marginBottom: 4 }}>Member Sign-Up QR</h3>
+    <div className="adm-lead" style={{ marginBottom: 14 }}>
+      {cleanName ? <>For <b>{cleanName}</b> · </> : ''}
+      {invite.days ? `${invite.days}-day pass` : 'Unlimited membership'}
+    </div>
+    <div style={{ display: 'inline-block', padding: 14, background: '#fff', borderRadius: 16, marginBottom: 12 }}>
+      <QrCanvas value={url} size={200} />
+    </div>
+    <div style={{ marginBottom: 12 }}>
+      <span className="adm-code">{invite.code}</span>
+      {url && <div className="dim small" style={{ marginTop: 6, wordBreak: 'break-all', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>{url}</div>}
+    </div>
+    <input className="input" placeholder="Member name (pre-fills on their phone)" maxLength={40}
+      value={memberName} onChange={e => setMemberName(e.target.value)}
+      style={{ marginBottom: 12, textAlign: 'center', background: 'var(--surface-2)' }} />
+    <div className="adm-hint" style={{ marginBottom: 14 }}>Member points their phone camera at this QR code to open sign-up with their name and pass code pre-filled.</div>
+    <Button variant="primary" icon="copy" onClick={copyUrl}>Copy sign-up link</Button>
+    <div style={{ height: 8 }} />
+    <Button variant="ghost" className="dim" onClick={close}>Done</Button>
+  </div>
+}
 
 // Admin-only operator dashboard (owner passkey + admin flag; guarded again server-side).
 // Deliberately English-only — it isn't part of the translated end-user surface, so it stays
@@ -90,6 +150,16 @@ function UserDetail({ id, viewerOwner, onChanged, close }) {
       .then(() => { toast(disabled ? 'User disabled' : 'User enabled'); onChanged(); close() })
       .catch(e => toast(e.message))
   }
+  const ms = membershipStatus(u)
+  const renew = (days, clear = false) => {
+    api('/api/admin/user/renew', { method: 'POST', body: JSON.stringify(clear ? { id: u.id, clear: true } : { id: u.id, days }) })
+      .then(r => {
+        setD(prev => ({ ...prev, user: { ...prev.user, membershipUntil: r.membershipUntil, membershipExpired: r.membershipExpired, renewals: r.renewals } }))
+        toast(clear ? 'Membership limit cleared' : `Membership extended +${days}d`)
+        onChanged()
+      })
+      .catch(e => toast(e.message))
+  }
   // One owner, any number of admins: only the owner appoints, removes or hands the role on.
   const setRole = admin => api('/api/admin/user/role', { method: 'POST', body: JSON.stringify({ id: u.id, admin }) })
     .then(() => { toast(admin ? u.name + ' is an admin now' : u.name + ' is no longer an admin'); onChanged(); close() })
@@ -130,11 +200,13 @@ function UserDetail({ id, viewerOwner, onChanged, close }) {
     <h3 className="capitalize">{u.name}</h3>
     <div className="row" style={{ gap: 6, flexWrap: 'wrap', margin: '8px 0 12px' }}>
       {u.owner ? <span className="adm-pill acc">owner</span> : u.admin && <span className="adm-pill acc">admin</span>}
+      {!u.admin && typeof u.membershipUntil === 'number' && <span className={'adm-pill ' + ms.cls}>{ms.label}</span>}
       {u.disabled && <span className="adm-pill bad">disabled</span>}
       {u.invitedBy && <span className="adm-pill">invite {u.invitedBy}</span>}
       {u.password && <span className="adm-pill">password</span>}
       {/* The sign-in e-mail (password instances only): shown to admins and nobody else. */}
       {u.email && <span className="adm-pill" title="sign-in e-mail">{u.email}</span>}
+      {u.phone && <span className="adm-pill" title="phone">{u.phone}</span>}
       {u.resetUntil && <span className="adm-pill acc">reset code until {new Date(u.resetUntil).toLocaleString()}</span>}
       {u.recoveryUntil && <span className="adm-pill acc">recovery code until {new Date(u.recoveryUntil).toLocaleString()}</span>}
       <span className="adm-pill">joined {u.created ? fmtDate(u.created.slice(0, 10)) : '–'}</span>
@@ -159,6 +231,39 @@ function UserDetail({ id, viewerOwner, onChanged, close }) {
       </>}
     </>}
     {!u.admin && <>
+      <h4 className="sec">Membership & Renewal</h4>
+      <div className="adm-lead" style={{ marginBottom: 8 }}>
+        {typeof u.membershipUntil === 'number'
+          ? (ms.kind === 'expired'
+            ? `Expired on ${fmtDate(new Date(u.membershipUntil).toISOString().slice(0, 10))} (Read-only mode).`
+            : `Active until ${fmtDate(new Date(u.membershipUntil).toISOString().slice(0, 10))} (${ms.label}).`)
+          : 'No expiration date set (unlimited access).'}
+      </div>
+      <div className="adm-actions">
+        {PLAN_TIERS.map(p => (
+          <button key={p.days} className="btn" style={{ width: 'auto', flex: '1 1 auto' }} onClick={() => renew(p.days)}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+      {typeof u.membershipUntil === 'number' && <>
+        <button className="btn" style={{ marginTop: 8 }} onClick={() => renew(0, true)}>Clear expiry</button>
+      </>}
+      {Array.isArray(u.renewals) && u.renewals.length > 0 && (
+        <details className="adm-fold" style={{ marginTop: 10 }}>
+          <summary>Renewal history ({u.renewals.length})<Icon name="chevronRight" className="chev" /></summary>
+          <div className="adm-fold-b">
+            <div className="adm-log">
+              {u.renewals.map((r, idx) => (
+                <div key={idx} className="adm-log-row">
+                  <span>{r.days ? `+${r.days}d` : r.until ? `until ${fmtDate(new Date(r.until).toISOString().slice(0, 10))}` : 'unlimited'}{r.by ? ` · by ${r.by}` : ''}</span>
+                  <span className="when">{fmtDate(new Date(r.ts).toISOString().slice(0, 10))}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </details>
+      )}
       <button className={'btn ' + (u.disabled ? 'primary' : 'danger')} style={{ margin: '12px 0 4px' }}
         onClick={() => u.disabled ? setDisabled(false)
           : confirmSheet({ title: 'Disable ' + u.name + '?', message: 'They are signed out everywhere and can no longer sync or log in until re-enabled. Their data stays.', confirmText: 'Disable', danger: true, onConfirm: () => setDisabled(true) })}>
@@ -208,9 +313,21 @@ function UserDetail({ id, viewerOwner, onChanged, close }) {
 
 function InvitesCard({ invites, reload, inviteOnly }) {
   const toast = useUI(s => s.toast)
-  const gen = () => api('/api/admin/invites/new', { method: 'POST', body: '{}' })
-    .then(({ invite }) => { navigator.clipboard?.writeText(invite.code).catch(() => {}); toast('Code ' + invite.code + ' created & copied'); reload() })
-    .catch(e => toast(e.message))
+  const openSheet = useUI(s => s.openSheet)
+  const [planDays, setPlanDays] = useState(30)
+  const [note, setNote] = useState('')
+  const gen = () => {
+    const payload = { ...(planDays ? { days: planDays } : {}), ...(note.trim() ? { note: note.trim() } : {}) }
+    api('/api/admin/invites/new', { method: 'POST', body: JSON.stringify(payload) })
+      .then(({ invite }) => {
+        setNote('')
+        navigator.clipboard?.writeText(invite.code).catch(() => {})
+        toast('Pass ' + invite.code + ' created & copied')
+        reload()
+        openSheet(done => <InviteQrSheet invite={invite} close={done} />)
+      })
+      .catch(e => toast(e.message))
+  }
   const revoke = code => confirmSheet({
     title: 'Revoke code ' + code + '?', message: 'Anyone who has it can no longer use it. People who already signed up with it are not affected.',
     confirmText: 'Revoke', danger: true,
@@ -221,30 +338,51 @@ function InvitesCard({ invites, reload, inviteOnly }) {
   const open = (invites || []).filter(i => !i.usedBy)
   const used = (invites || []).filter(i => i.usedBy)
   return <div className="card">
-    <div className="row between"><h2 style={{ margin: 0 }}>Invite codes</h2>
-      <Button variant="primary" size="sm" onClick={gen} icon="plus">New code</Button></div>
+    <h2 style={{ margin: '0 0 2px' }}>Invite codes & QR Passes</h2>
     <div className="adm-lead">
       {inviteOnly
-        ? 'Sign-up is invite-only: someone needs one of these codes to create a profile. Each code works once.'
-        : 'Sign-up is open, so codes are optional here. They only record who invited whom.'}
+        ? 'Sign-up is invite-only: generate a named pass below and let the member scan its QR code to register.'
+        : 'Sign-up is open, so passes are optional here. They pre-fill the member’s name and membership duration.'}
     </div>
+    <form onSubmit={e => { e.preventDefault(); gen() }} style={{ marginBottom: 16 }}>
+      <div className="adm-group-t">1. Member Name (pre-fills on their phone)</div>
+      <input className="input" placeholder="Member name (e.g. Juan Dela Cruz)" maxLength={60} value={note} onChange={e => setNote(e.target.value)} style={{ marginBottom: 12 }} />
+      <div className="adm-group-t">2. Plan duration</div>
+      <div className="adm-chips" style={{ marginBottom: 14 }}>
+        {PLAN_TIERS.map(p => (
+          <button key={p.days} type="button" className={'chip' + (planDays === p.days ? ' on' : '')} onClick={() => setPlanDays(p.days)}>{p.short}</button>
+        ))}
+        <button type="button" className={'chip' + (planDays === null ? ' on' : '')} onClick={() => setPlanDays(null)}>No expiry</button>
+      </div>
+      <Button type="submit" variant="primary" icon="qr">Generate Pass & Show QR</Button>
+    </form>
     {open.length ? <>
-      <div className="adm-group-t">Unused · tap to copy</div>
-      {open.map(i => <div key={i.code} className="row between" style={{ padding: '6px 0', borderBottom: 'var(--hair) solid var(--sep)' }}>
-        <button className="adm-code" onClick={() => copy(i.code)} aria-label={'copy ' + i.code}>{i.code}</button>
-        <div className="row" style={{ gap: 4 }}>
-          <button className="iconbtn adm-iconbtn" onClick={() => copy(i.code)} aria-label="copy"><Icon name="copy" /></button>
-          <button className="iconbtn adm-iconbtn" style={{ color: 'var(--red)' }} onClick={() => revoke(i.code)} aria-label="revoke"><Icon name="trash" /></button>
+      <div className="adm-group-t">Unused passes · tap QR to scan or click code to copy</div>
+      {open.map(i => <div key={i.code} className="row between" style={{ padding: '8px 0', borderBottom: 'var(--hair) solid var(--sep)' }}>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', minWidth: 0, alignItems: 'center' }}>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{i.note || 'Unnamed pass'}</span>
+          {i.days ? <span className="adm-pill acc">{i.days}d</span> : <span className="adm-pill">Unlimited</span>}
+          <button type="button" className="adm-code" onClick={() => copy(i.code)} aria-label={'copy ' + i.code}>{i.code}</button>
+        </div>
+        <div className="row" style={{ gap: 4, flex: 'none' }}>
+          <button type="button" className="iconbtn adm-iconbtn" onClick={() => openSheet(done => <InviteQrSheet invite={i} close={done} />)} aria-label="show QR"><Icon name="qr" /></button>
+          <button type="button" className="iconbtn adm-iconbtn" onClick={() => copy(i.code)} aria-label="copy"><Icon name="copy" /></button>
+          <button type="button" className="iconbtn adm-iconbtn" style={{ color: 'var(--red)' }} onClick={() => revoke(i.code)} aria-label="revoke"><Icon name="trash" /></button>
         </div>
       </div>)}
     </> : null}
     {used.length ? <>
-      <div className="adm-group-t" style={{ marginTop: open.length ? 12 : 0 }}>Already used</div>
+      <div className="adm-group-t" style={{ marginTop: open.length ? 14 : 0 }}>Already used</div>
       {used.map(i => <div key={i.code} className="row between dim" style={{ padding: '6px 0', fontSize: 'var(--fs-footnote)' }}>
-        <span style={{ fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', letterSpacing: '.06em' }}>{i.code}</span><span>→ {i.usedByName || 'used'}</span>
+        <span>
+          <b style={{ color: 'var(--label-2)' }}>{i.usedByName || i.note || 'Member'}</b>
+          {' · '}
+          <span style={{ fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', letterSpacing: '.06em' }}>{i.code}{i.days ? ` (${i.days}d)` : ''}</span>
+        </span>
+        <span>{i.note && i.usedByName && i.note !== i.usedByName ? `for ${i.note}` : 'redeemed'}</span>
       </div>)}
     </> : null}
-    {!open.length && !used.length && <div className="adm-empty">No codes yet. "New code" makes one and copies it to your clipboard.</div>}
+    {!open.length && !used.length && <div className="adm-empty">No passes yet. Enter a member's name above and tap "Generate Pass & Show QR".</div>}
   </div>
 }
 
@@ -313,12 +451,8 @@ export default function Admin() {
   // Opened from Settings → AI Coach (the hosted app's way to the Coach, which is the server's):
   // straight to the Coach card rather than the top of the page.
   const toCoach = useLocation().state?.section === 'coach'
-  const coachRef = useRef(null)
-  useEffect(() => {
-    if (!toCoach) return
-    const tm = setTimeout(() => coachRef.current?.scrollIntoView({ block: 'start' }), 50)
-    return () => clearTimeout(tm)
-  }, [toCoach])
+  const [tab, setTab] = useState(toCoach ? 'coach' : 'overview')
+  useEffect(() => { if (toCoach) setTab('coach') }, [toCoach])
   const user = useStore(s => s.user)
   const openSheet = useUI(s => s.openSheet)
   const [users, setUsers] = useState(null)
@@ -326,6 +460,8 @@ export default function Admin() {
   const [invites, setInvites] = useState(null)
   const [inviteOnly, setInviteOnly] = useState(false)
   const [tick, setTick] = useState(0)          // the ↻ button; the activity log listens to it
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState('all')
 
   // A failed load, or an answer without a list, used to leave the page on "Loading…" for good —
   // with a toast every 15 seconds from the poll, or with nothing at all when the answer was
@@ -347,64 +483,218 @@ export default function Admin() {
   const openUser = id => openSheet(close => <UserDetail id={id} viewerOwner={viewerOwner} onChanged={loadUsers} close={close} />)
   const liveUsers = (users || []).filter(u => u.live)
   const activeCount = (users || []).filter(u => u.lastSync && Date.now() - u.lastSync < 7 * 86400000).length
-  const disabledCount = (users || []).filter(u => u.disabled).length
+  const expiringCount = (users || []).filter(u => membershipStatus(u).kind === 'expiring').length
+  const expiredCount = (users || []).filter(u => membershipStatus(u).kind === 'expired').length
+  const unusedInvitesCount = (invites || []).filter(i => !i.usedBy && !i.revoked).length
+  const q = query.trim().toLowerCase()
+  const filteredUsers = (users || []).filter(u => {
+    const ms = membershipStatus(u)
+    if (filter === 'active' && ms.kind !== 'active' && ms.kind !== 'expiring') return false
+    if (filter === 'expiring' && ms.kind !== 'expiring') return false
+    if (filter === 'expired' && ms.kind !== 'expired') return false
+    if (!q) return true
+    return (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q) || (u.phone || '').toLowerCase().includes(q)
+  })
 
-  return <div className="narrow">
-    <div className="hdr">
-      <button className="iconbtn" data-back="/settings/account" onClick={() => nav('/settings/account')} aria-label="Back"><Icon name="chevronLeft" /></button>
-      <div style={{ flex: 1, marginInlineStart: 12 }}><h1 style={{ margin: 0 }}>Admin</h1>
-        <div className="sub">{users ? users.length + ' users · ' + activeCount + ' active this week' : usersErr ? 'Could not load' : 'Loading…'}</div></div>
-      <button className="iconbtn" onClick={() => { loadUsers(); loadInvites(); setTick(n => n + 1) }} aria-label="refresh">↻</button>
-    </div>
-    <div className="adm-intro">
-      Everything about running this instance: who uses it, how they get in, the AI Coach, and what has happened on it. Nothing here shows anyone's training data beyond counts.
-    </div>
+  const refreshAll = () => { loadUsers(); loadInvites(); setTick(n => n + 1) }
+  const signOut = () => { useStore.getState().signOut?.({ force: true }) }
+  const jumpToMembers = nextFilter => { setFilter(nextFilter); setTab('members') }
 
-    {usersErr && <div className="card" role="alert" style={{ borderColor: 'var(--red)' }}>
-      <div className="row between"><h2 style={{ margin: 0 }}>{users ? 'The last update failed' : 'Could not load the users'}</h2>
-        <Button size="sm" icon="reset" onClick={loadUsers}>Try again</Button></div>
-      <div className="adm-lead" style={{ marginBottom: 0 }}>
-        {usersErr} {users ? 'The list below is the last one that loaded.' : 'It tries again every 15 seconds.'}
+  const TABS = [
+    { id: 'overview', label: 'Overview', short: 'Overview', icon: 'chart', badge: liveUsers.length ? liveUsers.length + ' live' : null, badgeCls: 'ok' },
+    { id: 'members', label: 'Members', short: 'Members', icon: 'personCircle', badge: users ? String(users.length) : null, badgeCls: expiredCount ? 'bad' : expiringCount ? 'warn' : '' },
+    { id: 'invites', label: 'Invites & QR', short: 'Invites', icon: 'qr', badge: unusedInvitesCount ? String(unusedInvitesCount) : null, badgeCls: 'acc' },
+    { id: 'coach', label: 'AI Coach', short: 'Coach', icon: 'sparkles', badge: null, badgeCls: '' },
+    { id: 'audit', label: 'Activity Log', short: 'Log', icon: 'clock', badge: null, badgeCls: '' },
+  ]
+  const activeTabObj = TABS.find(x => x.id === tab) || TABS[0]
+
+  return <div className="adm-shell">
+    <aside className="adm-sidebar">
+      <div>
+        <div className="adm-brand">
+          <div className="adm-brand-ic"><Icon name="dumbbell" /></div>
+          <div className="grow">
+            <div className="adm-brand-t">openGym Admin</div>
+            <div className="sub">{users ? users.length + ' users · ' + activeCount + ' active this week' : usersErr ? 'Could not load' : 'Loading…'}</div>
+          </div>
+        </div>
+
+        <div className="adm-nav-sect">Workspace</div>
+        <nav className="adm-sidenav" aria-label="Admin sections">
+          {TABS.map(item => (
+            <button key={item.id} type="button" className={'adm-navbtn' + (tab === item.id ? ' on' : '')} onClick={() => setTab(item.id)}>
+              <Icon name={item.icon} />
+              <span className="grow">{item.label}</span>
+              {item.badge && <span className={'adm-pill ' + item.badgeCls}>{item.badge}</span>}
+            </button>
+          ))}
+        </nav>
       </div>
-    </div>}
 
-    <div className="tiles" style={{ marginBottom: 12 }}>
-      <div className="tile"><div className="l">Users</div><div className="v">{users ? users.length : '–'}</div></div>
-      <div className="tile"><div className="l">Training now</div><div className="v" style={{ color: liveUsers.length ? 'var(--acc)' : undefined }}>{users ? liveUsers.length : '–'}</div></div>
-      <div className="tile"><div className="l">Active 7 days</div><div className="v">{users ? activeCount : '–'}</div></div>
-      <div className="tile"><div className="l">Disabled</div><div className="v">{users ? disabledCount : '–'}</div></div>
-    </div>
-
-    {liveUsers.length > 0 && <div className="card" style={{ borderColor: 'var(--acc)' }}>
-      <h2 className="row" style={{ margin: '0 0 2px', gap: 6 }}><Icon name="dot" style={{ fontSize: 10, color: 'var(--green)' }} />Training now</h2>
-      <div className="adm-lead">Sessions running at this moment. Tap a name for details.</div>
-      {liveUsers.map(u => <div key={u.id} className="row between" style={{ padding: '8px 2px', borderBottom: 'var(--hair) solid var(--sep)' }} onClick={() => openUser(u.id)}>
-        <div><div className="small" style={{ fontWeight: 600 }}>{u.name}</div>
-          <div className="dim" style={{ fontSize: 'var(--fs-caption2)' }}>{u.live.name} · exercise {u.live.exIdx} of {u.live.exTotal} · {u.live.setsDone}/{u.live.setsTotal} sets</div></div>
-        <span className="adm-pill acc">{dur(Date.now() - u.live.startedAt)}</span>
-      </div>)}
-    </div>}
-
-    {/* The Coach setup. Renders nothing at all unless the instance offers the Coach, so an admin
-        page on a box that never enabled it is byte-for-byte the page it was before. */}
-    <div ref={coachRef} className="adm-coach-anchor"><AdminCoach /></div>
-
-    <InvitesCard invites={invites} reload={loadInvites} inviteOnly={inviteOnly} />
-
-    <div className="card">
-      <h2 style={{ margin: 0 }}>Users</h2>
-      <div className="adm-lead">Everyone with a profile on this instance. Tap one to see their activity, to disable the account (nothing is deleted) or to delete it with all their data for good.</div>
-      <div className="list">
-        {(users || []).map(u => <div key={u.id} className="item" onClick={() => openUser(u.id)} style={u.disabled ? { opacity: .55 } : null}>
-          <div className="grow"><div className="tt">{u.live && <Icon name="dot" style={{ fontSize: 9, color: 'var(--green)', display: 'inline-block', marginInlineEnd: 5 }} />}{u.name} {u.admin && <span className="adm-pill acc" style={{ marginInlineStart: 4 }}>{u.owner ? 'owner' : 'admin'}</span>}{u.disabled && <span className="adm-pill bad" style={{ marginInlineStart: 4 }}>disabled</span>}</div>
-            <div className="ss">{u.live ? 'training now · ' + u.live.name : u.workouts + ' workouts' + (u.lastWorkout ? ' · last ' + fmtDate(u.lastWorkout) : '') + ' · last sync ' + rel(u.lastSync)}</div>
-            {u.email && <div className="ss" title="sign-in e-mail">{u.email}</div>}</div>
-          {u.hasPush && <Icon name="bell" title="push notifications on" style={{ fontSize: 'var(--fs-subhead)', color: 'var(--label-3)' }} />}<Icon name="chevronRight" className="chev" />
-        </div>)}
-        {users && !users.length && <div className="adm-empty">No users yet.</div>}
+      <div className="adm-sidefoot">
+        <div className="adm-acct">
+          <div className="adm-acct-user">
+            <div className="adm-user-avatar" aria-hidden="true">{(user.name || '?')[0].toUpperCase()}</div>
+            <div className="adm-acct-name">{user.name}</div>
+          </div>
+          <span className="adm-pill acc">{viewerOwner || user.owner ? 'owner' : 'admin'}</span>
+        </div>
+        <div className="adm-side-actions">
+          <button type="button" className="btn ghost sm" data-back="/home" onClick={() => nav('/home')}>
+            <Icon name="house" /><span>Member App</span>
+          </button>
+          <button type="button" className="btn ghost sm" onClick={signOut}>
+            <span>Sign out</span>
+          </button>
+        </div>
       </div>
-    </div>
+    </aside>
 
-    <div style={{ marginTop: 14 }}><AuditCard tick={tick} owner={viewerOwner} /></div>
+    <main className="adm-main">
+      <div className="adm-topbar">
+        <div className="grow">
+          <h1 style={{ margin: 0 }}>{activeTabObj.label}</h1>
+          <div className="adm-intro" style={{ margin: '2px 0 0' }}>
+            {tab === 'overview' && 'Gym pulse, active floor sessions, and quick front-desk actions.'}
+            {tab === 'members' && 'Manage gym members, check subscription status, and record renewals.'}
+            {tab === 'invites' && 'Generate plan-linked invite codes and scannable QR codes for new members.'}
+            {tab === 'coach' && 'Configure the instance AI Coach provider, models, and daily usage caps.'}
+            {tab === 'audit' && 'Chronological security and membership renewal log for this gym instance.'}
+          </div>
+        </div>
+        <div className="row adm-topbar-acts" style={{ gap: 8 }}>
+          <button type="button" className="btn primary sm adm-desk-only" onClick={() => setTab('invites')}>
+            <Icon name="qr" /><span>+ Invite / QR</span>
+          </button>
+          <button type="button" className="iconbtn adm-mob-only" data-back="/home" onClick={() => nav('/home')} aria-label="Back" title="Member App"><Icon name="house" /></button>
+          <button type="button" className="iconbtn" onClick={refreshAll} aria-label="refresh" title="Refresh">↻</button>
+          <button type="button" className="btn ghost sm adm-mob-only" onClick={signOut}>Sign out</button>
+        </div>
+      </div>
+
+      <div className="adm-body">
+        {usersErr && <div className="card" role="alert" style={{ borderColor: 'var(--red)', marginBottom: 16 }}>
+          <div className="row between"><h2 style={{ margin: 0 }}>{users ? 'The last update failed' : 'Could not load the users'}</h2>
+            <Button size="sm" icon="reset" onClick={loadUsers}>Try again</Button></div>
+          <div className="adm-lead" style={{ marginBottom: 0 }}>
+            {usersErr} {users ? 'The list below is the last one that loaded.' : 'It tries again every 15 seconds.'}
+          </div>
+        </div>}
+
+        <div className="adm-kpis">
+          <button type="button" className="tile adm-kpi-btn" onClick={() => jumpToMembers('all')}>
+            <div className="l">Users</div>
+            <div className="v">{users ? users.length : '–'}</div>
+            <div className="adm-kpi-foot">All profiles →</div>
+          </button>
+          <button type="button" className="tile adm-kpi-btn" onClick={() => jumpToMembers('expiring')}>
+            <div className="l">Expiring ≤ 3d</div>
+            <div className="v" style={{ color: expiringCount ? 'var(--yellow)' : undefined }}>{users ? expiringCount : '–'}</div>
+            <div className="adm-kpi-foot">Within 3 days →</div>
+          </button>
+          <button type="button" className="tile adm-kpi-btn" onClick={() => jumpToMembers('expired')}>
+            <div className="l">Expired</div>
+            <div className="v" style={{ color: expiredCount ? 'var(--red)' : undefined }}>{users ? expiredCount : '–'}</div>
+            <div className="adm-kpi-foot">Needs renewal →</div>
+          </button>
+          <button type="button" className="tile adm-kpi-btn" onClick={() => setTab('overview')}>
+            <div className="l">Training now</div>
+            <div className="v" style={{ color: liveUsers.length ? 'var(--acc)' : undefined }}>{users ? liveUsers.length : '–'}</div>
+            <div className="adm-kpi-foot">Active floor</div>
+          </button>
+        </div>
+
+        {/* Overview panel */}
+        <div className={'adm-panel' + (tab === 'overview' ? '' : ' off')}>
+          <div className="adm-grid-2">
+            <div className="card" style={{ margin: 0 }}>
+              <h2 style={{ margin: '0 0 2px' }}>Front Desk Quick Actions</h2>
+              <div className="adm-lead">Common tasks for walk-in sign-ups, subscription renewals, and AI Coach setup.</div>
+              <div className="adm-actions adm-quick-actions">
+                <Button variant="primary" size="sm" icon="qr" onClick={() => setTab('invites')}>+ New Invite / QR Code</Button>
+                <Button size="sm" className="adm-action-btn" icon="personCircle" trailingIcon="chevronRight" onClick={() => jumpToMembers('all')}>Manage Members ({users ? users.length : 0})</Button>
+                {(expiringCount > 0 || expiredCount > 0) && (
+                  <Button size="sm" className="adm-action-btn" icon="clock" trailingIcon="chevronRight" onClick={() => jumpToMembers(expiredCount ? 'expired' : 'expiring')}>
+                    Review Renewals ({expiringCount + expiredCount})
+                  </Button>
+                )}
+                <Button size="sm" className="adm-action-btn" icon="sparkles" trailingIcon="chevronRight" onClick={() => setTab('coach')}>AI Coach Settings</Button>
+              </div>
+            </div>
+
+            <div className="card" style={{ margin: 0, borderColor: liveUsers.length ? 'var(--acc)' : undefined }}>
+              <h2 className="row" style={{ margin: '0 0 2px', gap: 6 }}>
+                <Icon name="dot" style={{ fontSize: 10, color: liveUsers.length ? 'var(--green)' : 'var(--label-3)' }} />Training now
+              </h2>
+              <div className="adm-lead">Sessions running at this moment. Tap a member for details.</div>
+              {liveUsers.length > 0 ? liveUsers.map(u => <div key={u.id} className="row between" style={{ padding: '8px 2px', borderBottom: 'var(--hair) solid var(--sep)', cursor: 'pointer' }} onClick={() => openUser(u.id)}>
+                <div><div className="small" style={{ fontWeight: 600 }}>{u.name}</div>
+                  <div className="dim" style={{ fontSize: 'var(--fs-caption2)' }}>{u.live.name} · exercise {u.live.exIdx} of {u.live.exTotal} · {u.live.setsDone}/{u.live.setsTotal} sets</div></div>
+                <span className="adm-pill acc">{dur(Date.now() - u.live.startedAt)}</span>
+              </div>) : <div className="adm-empty">No members currently in an active workout session.</div>}
+            </div>
+          </div>
+        </div>
+
+        {/* Members panel */}
+        <div className={'adm-panel' + (tab === 'members' || tab === 'overview' ? '' : ' off')}>
+          <div className="card">
+            <div className="row between" style={{ marginBottom: 2 }}>
+              <h2 style={{ margin: 0 }}>Users & Memberships</h2>
+              {tab === 'overview' && <Button size="sm" variant="ghost" onClick={() => setTab('members')}>Full view →</Button>}
+            </div>
+            <div className="adm-lead">Everyone with a profile on this instance. Tap one to manage membership renewals, view activity, disable or delete.</div>
+            {users && users.length > 0 && <>
+              <input className="input" placeholder="Search by name, e-mail or phone…" value={query} onChange={e => setQuery(e.target.value)} style={{ marginBottom: 10 }} />
+              <div className="chips" style={{ marginBottom: 10 }}>
+                {[['all', 'All'], ['active', 'Active'], ['expiring', 'Expiring ≤ 3d'], ['expired', 'Expired']].map(([v, l]) =>
+                  <button key={v} type="button" className={'chip' + (filter === v ? ' on' : '')} onClick={() => setFilter(v)}>{l}</button>)}
+              </div>
+            </>}
+            <div className="list">
+              {filteredUsers.map(u => {
+                const ms = membershipStatus(u)
+                return <button type="button" key={u.id} className="item adm-member-row" onClick={() => openUser(u.id)} style={u.disabled ? { opacity: .55 } : null}>
+                  <div className="adm-avatar" aria-hidden="true">{(u.name || '?')[0].toUpperCase()}</div>
+                  <div className="grow"><div className="tt">{u.live && <Icon name="dot" style={{ fontSize: 9, color: 'var(--green)', display: 'inline-block', marginInlineEnd: 5 }} />}{u.name} {u.admin && <span className="adm-pill acc" style={{ marginInlineStart: 4 }}>{u.owner ? 'owner' : 'admin'}</span>}{!u.admin && typeof u.membershipUntil === 'number' && <span className={'adm-pill ' + ms.cls} style={{ marginInlineStart: 4 }}>{ms.label}</span>}{u.disabled && <span className="adm-pill bad" style={{ marginInlineStart: 4 }}>disabled</span>}</div>
+                    <div className="ss">{u.live ? 'training now · ' + u.live.name : u.workouts + ' workouts' + (u.lastWorkout ? ' · last ' + fmtDate(u.lastWorkout) : '') + ' · last sync ' + rel(u.lastSync)}</div>
+                    {(u.email || u.phone) && <div className="ss">{[u.email, u.phone].filter(Boolean).join(' · ')}</div>}</div>
+                  <span className="adm-row-manage adm-desk-only">Manage</span>
+                  {u.hasPush && <Icon name="bell" title="push notifications on" style={{ fontSize: 'var(--fs-subhead)', color: 'var(--label-3)' }} />}<Icon name="chevronRight" className="chev" />
+                </button>
+              })}
+              {users && !users.length && <div className="adm-empty">No users yet.</div>}
+              {users && users.length > 0 && !filteredUsers.length && <div className="adm-empty">No matching members.</div>}
+            </div>
+          </div>
+        </div>
+
+        {/* Invites & QR panel */}
+        <div className={'adm-panel' + (tab === 'invites' ? '' : ' off')}>
+          <InvitesCard invites={invites} reload={loadInvites} inviteOnly={inviteOnly} />
+        </div>
+
+        {/* AI Coach panel */}
+        <div className={'adm-panel' + (tab === 'coach' ? '' : ' off')}>
+          <div className="adm-coach-anchor"><AdminCoach /></div>
+        </div>
+
+        {/* Activity / Audit Log panel */}
+        <div className={'adm-panel' + (tab === 'audit' ? '' : ' off')}>
+          <AuditCard tick={tick} owner={viewerOwner} />
+        </div>
+      </div>
+    </main>
+
+    {/* Dedicated Mobile Admin Bottom Tab Bar (< 768px) */}
+    <nav className="adm-mobnav" aria-label="Admin mobile navigation">
+      {TABS.map(item => (
+        <button key={item.id} type="button" className={tab === item.id ? 'on' : ''} onClick={() => setTab(item.id)}>
+          <span className="adm-mobic"><Icon name={item.icon} /></span>
+          <span>{item.short}</span>
+        </button>
+      ))}
+    </nav>
   </div>
 }
